@@ -1,0 +1,37 @@
+# 编译产物和缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 环境配置
+.conda/
+.venv/
+
+# 数据
+data/
+
+# 日志和临时文件
+logs/
+jamma_logs/
+tmp/
+*.log
+*.out
+*.0
+*.yaml
+
+# 模型权重和检查点
+*.pth
+*.ckpt
+checkpoints/
+weights/
+
+# IDE和编辑器配置
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+
+# 其他
+.DS_Store
+Thumbs.db

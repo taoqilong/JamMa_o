@@ -16,13 +16,15 @@ from src.utils.metrics import (
     compute_f1,
     compute_symmetrical_epipolar_errors,
     compute_pose_errors,
-    aggregate_metrics_train_val, aggregate_metrics_test
+    aggregate_metrics_train_val, aggregate_metrics_test,
+    compute_2d_errors,
+    aggregate_metrics_2d_train_val, aggregate_metrics_2d_test
 )
 from src.utils.comm import gather, all_gather
 from src.utils.misc import lower_config, flattenList
 from src.utils.profiler import PassThroughProfiler
 from thop import profile
-from src.utils.plotting import make_matching_figures
+from src.utils.plotting import make_matching_figures, make_matching_gt_figures
 
 
 class PL_JamMa(pl.LightningModule):
@@ -30,6 +32,7 @@ class PL_JamMa(pl.LightningModule):
         super().__init__()
         # Misc
         self.config = config  # full config
+        self.save_hyperparameters("config")  # save config to hparams
         _config = lower_config(self.config)
         self.JAMMA_cfg = lower_config(_config['jamma'])
         self.profiler = profiler or PassThroughProfiler()
@@ -131,48 +134,98 @@ class PL_JamMa(pl.LightningModule):
     def _compute_metrics_val(self, batch):
         with self.profiler.profile("Copmute metrics"):
             compute_f1(batch)  # compute fi-score
-            compute_symmetrical_epipolar_errors(batch)  # compute epi_errs for each match
-            compute_pose_errors(batch, self.config)  # compute R_errs, t_errs, pose_errs for each pair
+            if batch['dataset_name'][0].lower() in ['scannet', 'megadepth']:
+                compute_symmetrical_epipolar_errors(batch)  # compute epi_errs for each match
+                compute_pose_errors(batch, self.config)  # compute R_errs, t_errs, pose_errs for each pair
 
-            rel_pair_names = list(zip(*batch['pair_names']))
-            bs = batch['imagec_0'].size(0)
-            metrics = {
-                # to filter duplicate pairs caused by DistributedSampler
-                'identifiers': ['#'.join(rel_pair_names[b]) for b in range(bs)],
-                'epi_errs': [batch['epi_errs'][batch['m_bids'] == b].cpu().numpy() for b in range(bs)],
-                'precision': batch['precision'],
-                'recall': batch['recall'],
-                'f1_score': batch['f1_score'],
-                'R_errs': batch['R_errs'],
-                't_errs': batch['t_errs'],
-                'inliers': batch['inliers']}
-            ret_dict = {'metrics': metrics}
+                rel_pair_names = list(zip(*batch['pair_names']))
+                bs = batch['imagec_0'].size(0)
+                metrics = {
+                    # to filter duplicate pairs caused by DistributedSampler
+                    'identifiers': ['#'.join(rel_pair_names[b]) for b in range(bs)],
+                    'epi_errs': [batch['epi_errs'][batch['m_bids'] == b].cpu().numpy() for b in range(bs)],
+                    'precision': batch['precision'],
+                    'recall': batch['recall'],
+                    'f1_score': batch['f1_score'],
+                    'R_errs': batch['R_errs'],
+                    't_errs': batch['t_errs'],
+                    'inliers': batch['inliers']}
+                ret_dict = {'metrics': metrics}
+            elif batch['dataset_name'][0].lower() in ['whubuildings', 'jl1flight']:
+                compute_2d_errors(batch, self.config)
+
+                rel_pair_names = list(zip(*batch['pair_names']))
+                bs = batch['imagec_0'].size(0)
+                metrics = {
+                    # to filter duplicate pairs caused by DistributedSampler
+                    'identifiers': ['#'.join(rel_pair_names[b]) for b in range(bs)],
+                    'reproj_errors_list': batch['reproj_errors_list'],
+                    'precision': batch['precision'],
+                    'recall': batch['recall'],
+                    'f1_score': batch['f1_score'],
+                    'inliers': batch['inliers'],
+                    'corner_errs': batch['corner_errs']}
+                ret_dict = {'metrics': metrics}
         return ret_dict, rel_pair_names
 
     def _compute_metrics(self, batch):
         with self.profiler.profile("Copmute metrics"):
-            compute_symmetrical_epipolar_errors(batch)  # compute epi_errs for each match
-            compute_pose_errors(batch, self.config)  # compute R_errs, t_errs, pose_errs for each pair
+            if batch['dataset_name'][0].lower() in ['scannet', 'megadepth']:
+                compute_symmetrical_epipolar_errors(batch)  # compute epi_errs for each match
+                compute_pose_errors(batch, self.config)  # compute R_errs, t_errs, pose_errs for each pair
 
-            rel_pair_names = list(zip(*batch['pair_names']))
-            bs = batch['imagec_0'].size(0)
-            metrics = {
-                # to filter duplicate pairs caused by DistributedSampler
-                'identifiers': ['#'.join(rel_pair_names[b]) for b in range(bs)],
-                'epi_errs': [batch['epi_errs'][batch['m_bids'] == b].cpu().numpy() for b in range(bs)],
-                'R_errs': batch['R_errs'],
-                't_errs': batch['t_errs'],
-                'inliers': batch['inliers']}
-            ret_dict = {'metrics': metrics}
+                rel_pair_names = list(zip(*batch['pair_names']))
+                bs = batch['imagec_0'].size(0)
+                metrics = {
+                    # to filter duplicate pairs caused by DistributedSampler
+                    'identifiers': ['#'.join(rel_pair_names[b]) for b in range(bs)],
+                    'epi_errs': [batch['epi_errs'][batch['m_bids'] == b].cpu().numpy() for b in range(bs)],
+                    'R_errs': batch['R_errs'],
+                    't_errs': batch['t_errs'],
+                    'inliers': batch['inliers']}
+                ret_dict = {'metrics': metrics}
+            elif batch['dataset_name'][0].lower() in ['whubuildings', 'jl1flight']:
+                compute_2d_errors(batch, self.config)
+
+                rel_pair_names = list(zip(*batch['pair_names']))
+                bs = batch['imagec_0'].size(0)
+                metrics = {
+                    # to filter duplicate pairs caused by DistributedSampler
+                    'identifiers': ['#'.join(rel_pair_names[b]) for b in range(bs)],
+                    'reproj_errors_list': batch['reproj_errors_list'],
+                    'inliers': batch['inliers'],
+                    'corner_errs': batch['corner_errs']}
+                ret_dict = {'metrics': metrics}
         return ret_dict, rel_pair_names
 
     def training_step(self, batch, batch_idx):
 
         self._train_inference(batch)
         # logging
+        #
         if self.trainer.global_rank == 0 and self.global_step % self.trainer.log_every_n_steps == 0:
             # scalars
             self.logger.experiment.add_scalar(f'train_loss', batch['loss'], self.global_step)
+            for k,v in batch['loss_scalars'].items():
+                self.logger.experiment.add_scalar(f'train_loss/{k}', v, self.global_step)
+            # figures
+            if self.config.TRAINER.ENABLE_PLOTTING:
+                if self.config.DATASET.TRAINVAL_DATA_SOURCE.lower() in ['scannet', 'megadepth']:
+                    # compute_symmetrical_epipolar_errors(batch)  # compute epi_errs for each match
+                    figures = make_matching_figures(batch, mode='trainval')
+                    gt_figures = make_matching_gt_figures(batch, mode='gt')
+                    for k, v in gt_figures.items():
+                        self.logger.experiment.add_figure(f'train_match/{k}', v, self.global_step)
+                    for k, v in figures.items():
+                        self.logger.experiment.add_figure(f'train_match/{k}', v, self.global_step)
+                elif self.config.DATASET.TRAINVAL_DATA_SOURCE.lower() in ['jl1flight', 'whubuildings']:
+                    figures = make_matching_figures(batch, mode='trainval',dpi=150)
+                    gt_figures = make_matching_gt_figures(batch, mode='gt')
+                    for k, v in gt_figures.items():
+                        self.logger.experiment.add_figure(f'train_match/{k}', v, self.global_step)
+                    for k, v in figures.items():
+                        self.logger.experiment.add_figure(f'train_match/{k}', v, self.global_step)
+                plt.close('all')
 
         return {'loss': batch['loss']}
 
@@ -182,13 +235,14 @@ class PL_JamMa(pl.LightningModule):
             self.logger.experiment.add_scalar(
                 'train/avg_loss_on_epoch', avg_loss,
                 global_step=self.current_epoch)
-
     def validation_step(self, batch, batch_idx):
         self._val_inference(batch)
         ret_dict, _ = self._compute_metrics_val(batch)
         ret_dict['metrics'] = {**ret_dict['metrics'], 'max_matches': [batch['num_candidates_max']]}
         val_plot_interval = max(self.trainer.num_val_batches[0] // self.n_vals_plot, 1)
         figures = {self.config.TRAINER.PLOT_MODE: []}
+        if batch_idx % val_plot_interval == 0:
+            figures = make_matching_figures(batch, mode=self.config.TRAINER.PLOT_MODE)
 
         return {
             **ret_dict,
@@ -200,6 +254,18 @@ class PL_JamMa(pl.LightningModule):
         # handle multiple validation sets
         multi_outputs = [outputs] if not isinstance(outputs[0], (list, tuple)) else outputs
         multi_val_metrics = defaultdict(list)
+
+        # choose the right metrics and thresholds
+        ds = self.config.DATASET.TRAINVAL_DATA_SOURCE.lower()
+        is_depth = ds in ['scannet', 'megadepth']
+        if is_depth:
+            thr_list = [5, 10, 20]
+            agg_fn    = aggregate_metrics_train_val
+            cfg_thr   = self.config.TRAINER.EPI_ERR_THR
+        else:
+            thr_list = [3, 5, 10]
+            agg_fn    = aggregate_metrics_2d_train_val
+            cfg_thr   = self.config.TRAINER.REPROJ_ERR_THR
 
         for valset_idx, outputs in enumerate(multi_outputs):
             # since pl performs sanity_check at the very begining of the training
@@ -215,10 +281,10 @@ class PL_JamMa(pl.LightningModule):
             _metrics = [o['metrics'] for o in outputs]
             metrics = {k: flattenList(all_gather(flattenList([_me[k] for _me in _metrics]))) for k in _metrics[0]}
             # NOTE: all ranks need to `aggregate_merics`, but only log at rank-0
-            val_metrics_4tb = aggregate_metrics_train_val(metrics, self.config.TRAINER.EPI_ERR_THR, config=self.config)
-            for thr in [5, 10, 20]:
-                multi_val_metrics[f'auc@{thr}'].append(val_metrics_4tb[f'auc@{thr}'])
-
+            val_metrics = agg_fn(metrics, cfg_thr, config=self.config)
+            for thr in thr_list:
+                multi_val_metrics[f'auc@{thr}'].append(val_metrics[f'auc@{thr}'])
+                
             # 3. figures
             _figures = [o['figures'] for o in outputs]
             figures = {k: flattenList(gather(flattenList([_me[k] for _me in _figures]))) for k in _figures[0]}
@@ -229,7 +295,7 @@ class PL_JamMa(pl.LightningModule):
                     mean_v = torch.stack(v).mean()
                     self.logger.experiment.add_scalar(f'val_{valset_idx}/avg_{k}', mean_v, global_step=cur_epoch)
 
-                for k, v in val_metrics_4tb.items():
+                for k, v in val_metrics.items():
                     self.logger.experiment.add_scalar(f"metrics_{valset_idx}/{k}", v, global_step=cur_epoch)
 
                 for k, v in figures.items():
@@ -238,11 +304,11 @@ class PL_JamMa(pl.LightningModule):
                             self.logger.experiment.add_figure(
                                 f'val_match_{valset_idx}/{k}/pair-{plot_idx}', fig, cur_epoch, close=True)
             plt.close('all')
-
-        for thr in [5, 10, 20]:
+            
+        for thr in thr_list:
             # log on all ranks for ModelCheckpoint callback to work properly
             self.log(f'auc@{thr}', torch.tensor(np.mean(multi_val_metrics[f'auc@{thr}'])))  # ckpt monitors on this
-        print(val_metrics_4tb)
+        print(val_metrics)
 
     def test_step(self, batch, batch_idx):
         with torch.autocast(enabled=self.config.JAMMA.MP, device_type='cuda'):
@@ -301,9 +367,15 @@ class PL_JamMa(pl.LightningModule):
 
         if self.trainer.global_rank == 0:
             print(self.profiler.summary())
-            val_metrics_4tb = aggregate_metrics_test(metrics, self.config.TRAINER.EPI_ERR_THR, config=self.config)
-            logger.info('\n' + pprint.pformat(val_metrics_4tb))
-            print('Averaged Matching time over 1500 pairs: {:.2f} ms'.format(self.total_ms / 1500))
+            if self.config.DATASET.TRAINVAL_DATA_SOURCE.lower() in ['scannet', 'megadepth']:
+                val_metrics_4tb = aggregate_metrics_test(metrics, self.config.TRAINER.EPI_ERR_THR, config=self.config)
+                logger.info('\n' + pprint.pformat(val_metrics_4tb))
+                print('Averaged Matching time over 1500 pairs: {:.2f} ms'.format(self.total_ms / 1500))
+            elif self.config.DATASET.TRAINVAL_DATA_SOURCE.lower() in ['whubuildings', 'jl1flight']:
+                val_metrics_2d = aggregate_metrics_2d_test(metrics, self.config.TRAINER.REPROJ_ERR_THR, config=self.config)
+                logger.info('\n' + pprint.pformat(val_metrics_2d))
+                num_pairs = len(self.test_dataloader.dataset)
+                print('Averaged Matching time over {} pairs: {:.2f} ms'.format(num_pairs, self.total_ms / num_pairs))
             if self.dump_dir is not None:
                 np.save(Path(self.dump_dir) / 'JAMMA_pred_eval', dumps)
 

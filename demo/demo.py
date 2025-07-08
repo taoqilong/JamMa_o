@@ -8,6 +8,7 @@ import argparse
 from loguru import logger
 import torch.nn.functional as F
 from src.utils.plotting import make_confidence_figure, make_evaluation_figure_wheel
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 
 if __name__ == '__main__':

@@ -61,6 +61,27 @@ class Loss(nn.Module):
 
             d = p1Ep0**2 * (1.0 / (Ep0[:, 0]**2 + Ep0[:, 1]**2 + 1e-9) + 1.0 / (Etp1[:, 0]**2 + Etp1[:, 1]**2 + 1e-9))  # N
             return d
+
+    def _symmetric_reproj_error(self, pts0, pts1, M_0to1, M_1to0):
+        """
+        pts*: (N,2) in coarse/fine resolution
+        M_*  : (N,3,3) homography for each match batch index (m_bids 已选好)
+        Return: (N,) reprojection error = max(‖p0→1-p1‖², ‖p1→0-p0‖²)
+        """
+        # homogeneous
+        ones = torch.ones_like(pts0[:, :1])
+        p0_h = torch.cat([pts0, ones], dim=-1)          # (N,3)
+        p1_h = torch.cat([pts1, ones], dim=-1)
+
+        # warp
+        p0_w = (M_0to1 @ p0_h.unsqueeze(-1)).squeeze(-1)
+        p1_w = (M_1to0 @ p1_h.unsqueeze(-1)).squeeze(-1)
+        p0_w = p0_w[:, :2] / (p0_w[:, 2:]+1e-6)
+        p1_w = p1_w[:, :2] / (p1_w[:, 2:]+1e-6)
+
+        err01 = torch.sum((p0_w - pts1)**2, dim=-1)
+        err10 = torch.sum((p1_w - pts0)**2, dim=-1)
+        return torch.max(err01, err10) 
     
     def compute_sub_pixel_loss(self, data):
         """ symmetric epipolar distance loss.
@@ -72,19 +93,29 @@ class Loss(nn.Module):
             mkpts1_f_train (torch.Tensor): (N, 2) 
             }
         """
+        ds_name  = data['dataset_name'][0].lower()
+        if ds_name in ['scannet', 'megadepth']:
+            # ─── 深度 / 对极误差分支 ───
+            Tx = numeric.cross_product_matrix(data['T_0to1'][:, :3, 3])
+            E_mat = Tx @ data['T_0to1'][:, :3, :3]
 
-        Tx = numeric.cross_product_matrix(data['T_0to1'][:, :3, 3])
-        E_mat = Tx @ data['T_0to1'][:, :3, :3]
+            m_bids = data['m_bids']
+            pts0 = data['mkpts0_f_train']
+            pts1 = data['mkpts1_f_train']
+            
+            sym_dist = self._symmetric_epipolar_distance(pts0, pts1, E_mat[m_bids], data['K0'][m_bids], data['K1'][m_bids])
+            thr = self.config['trainer']['epi_err_thr']
+        else:
+            # ─── 无深度 / 单应重投影误差分支 ───
+            m_b  = data['m_bids']
+            M01  = data['M_0to1'][m_b]
+            M10  = data['M_1to0'][m_b]
+            sym_dist = self._symmetric_reproj_error(data['mkpts0_f_train'], data['mkpts1_f_train'], M01, M10)
+            thr = self.config['trainer']['reproj_err_thr']
 
-        m_bids = data['m_bids']
-        pts0 = data['mkpts0_f_train']
-        pts1 = data['mkpts1_f_train']
-        
-        sym_dist = self._symmetric_epipolar_distance(pts0, pts1, E_mat[m_bids], data['K0'][m_bids], data['K1'][m_bids])
         # filter matches with high epipolar error (only train approximately correct fine-level matches)
-
         loss0 = sym_dist
-        loss1 = sym_dist[sym_dist<1e-4]
+        loss1 = sym_dist[sym_dist<thr]
 
         if len(sym_dist)==0:
             return None

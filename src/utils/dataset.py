@@ -259,3 +259,45 @@ def read_scannet_intrinsic(path):
     """
     intrinsic = np.loadtxt(path, delimiter=' ')
     return intrinsic[:-1, :-1]
+
+# --- dataset without depth ---
+def read_dataset_color(path, resize=None, df=None, padding=False):
+    """
+    Args:
+        resize (int|None)  : 长边缩放到此像素；None 则保持原分辨率
+        df (int|None)      : 最终 H,W 需被 df 整除；None 则不做
+        padding (bool)     : 是否零填充成正方形
+    Returns:
+        image  : torch.FloatTensor  (1,3,H,W)  — 已 /255 并做 ImageNet 归一化
+        mask   : torch.BoolTensor   (H,W) or None
+        scale  : torch.FloatTensor  [w/w_new, h/h_new]
+        new_hw : torch.LongTensor   [H_new, W_new]   (含 padding 前尺寸)
+    """
+    image = Image.open(path).convert('RGB')
+
+    # --- resize & make divisible ------------------------------------------------
+    w_org, h_org = image.width, image.height
+    w_new, h_new = get_resized_wh(w_org, h_org, resize)
+    w_new, h_new = get_divisible_wh(w_new, h_new, df)
+    scale = torch.tensor([w_org / w_new, h_org / h_new], dtype=torch.float)
+    resize_fun = transforms.Resize((h_new, w_new), InterpolationMode.BICUBIC)
+    image = resize_fun(image)
+    image = np.array(image, dtype=np.float32)
+    if len(image.shape) == 2:
+        image = np.repeat(image[..., np.newaxis], 3, axis=2)  # (H,W) -> (H,W,3)
+    image = image.transpose((2, 0, 1))  # (H,W,3) -> (3,H,W)
+    image /= 255.0  # [0, 255] -> [0, 1]
+    image = torch.from_numpy(image)  # (3,H,W)   
+    Normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    image = Normalize(image).numpy()  # (3,H,W) -> (3,H,W) and normalized
+
+    # --- padding ---------------------------------------------------------------
+    if padding:
+        pad_to = max(h_new, w_new)
+        image, mask = pad_bottom_right(image, pad_to, ret_mask=True)   # mask shape (1,H,W)
+        mask = torch.from_numpy(mask[0])                         # -> (H,W) Bool
+    else:
+        mask = None
+
+    image = torch.from_numpy(image).float()[None]          # (1,3,H,W)
+    return image, scale, mask, torch.tensor([h_new, w_new])

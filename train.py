@@ -17,6 +17,8 @@ from src.utils.profiler import build_profiler
 from src.lightning.data import MultiSceneDataModule
 from src.lightning.lightning_jamma import PL_JamMa
 loguru_logger = get_rank_zero_only_logger(loguru_logger)
+import os 
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 
 def parse_args():
@@ -93,6 +95,17 @@ def main():
                                     save_last=True,
                                     dirpath=str(ckpt_dir),
                                     filename='{epoch}-{auc@5:.3f}-{auc@10:.3f}-{auc@20:.3f}')
+    ds = config.DATASET.TRAINVAL_DATA_SOURCE.lower()
+    if ds in ['scannet', 'megadepth']:
+        ckpt_callback = ModelCheckpoint(monitor='auc@10', verbose=True, save_top_k=3, mode='max',
+                                        save_last=True,
+                                        dirpath=str(ckpt_dir),
+                                        filename='{epoch}-{auc@5:.3f}-{auc@10:.3f}-{auc@20:.3f}')
+    else:
+        ckpt_callback = ModelCheckpoint(monitor='auc@10', verbose=True, save_top_k=3, mode='max',
+                                        save_last=True,
+                                        dirpath=str(ckpt_dir),
+                                        filename='{epoch}-{auc@3:.3f}-{auc@5:.3f}-{auc@10:.3f}')
     lr_monitor = LearningRateMonitor(logging_interval='step')
     callbacks = [lr_monitor]
     if not args.disable_ckpt:

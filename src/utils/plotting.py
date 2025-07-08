@@ -6,6 +6,7 @@ import cv2
 import torch
 from matplotlib import cm
 import matplotlib.patheffects as path_effects
+from loguru import logger
 imagenet_mean = torch.tensor([0.485, 0.456, 0.406])
 imagenet_std = torch.tensor([0.229, 0.224, 0.225])
 
@@ -16,6 +17,8 @@ def _compute_conf_thresh(data):
         thr = 5e-4
     elif dataset_name == 'megadepth':
         thr = 1e-4
+    elif dataset_name in ['whubuildings', 'jl1flight']:
+        thr = 3
     else:
         raise ValueError(f'Unknown dataset: {dataset_name}')
     return thr
@@ -89,24 +92,32 @@ def make_evaluation_figure_color(data, b_id, alpha='dynamic', path=None, dpi=150
     img0, img1 = img0.detach().permute(1, 2, 0).cpu().numpy(), img1.detach().permute(1, 2, 0).cpu().numpy()
     img0, img1 = np.clip(img0, 0.0, 1.0), np.clip(img1, 0.0, 1.0)
 
-    epi_errs = data['epi_errs'][b_mask].cpu().numpy()
-    correct_mask = epi_errs < conf_thr
+    if data['dataset_name'][0].lower() in ['scannet', 'megadepth']:
+        epi_errs = data['epi_errs'][b_mask].cpu().numpy()
+        correct_mask = epi_errs < conf_thr
+        R_errs = data['R_errs'][b_id][0]
+        t_errs = data['t_errs'][b_id][0]
+    elif data['dataset_name'][0].lower() in ['whubuildings', 'jl1flight']:
+        reproj_errs = data['reproj_errors_list'][b_id]
+        correct_mask = reproj_errs < conf_thr
     precision = np.mean(correct_mask) if len(correct_mask) > 0 else 0
     n_correct = np.sum(correct_mask)
-    R_errs = data['R_errs'][b_id][0]
-    t_errs = data['t_errs'][b_id][0]
+
 
     # matching info
     if alpha == 'dynamic':
         alpha = dynamic_alpha(len(correct_mask))
-    color = error_colormap(epi_errs, conf_thr, alpha=alpha)
-    runtime = data['runtime']
+    if data['dataset_name'][0].lower() in ['scannet', 'megadepth']:
+        color = error_colormap(epi_errs, conf_thr, alpha=alpha)
+    elif data['dataset_name'][0].lower() in ['whubuildings', 'jl1flight']:
+        color = error_colormap(reproj_errs, conf_thr, alpha=alpha)
+    # runtime = data['runtime']
     text = [
         f'#Matches {len(kpts0)}',
         f'Precision({conf_thr:.2e}) ({100 * precision:.1f}%): {n_correct}/{len(kpts0)}',
-        f'R_errs: {R_errs:.1f}',
-        f't_errs: {t_errs:.1f}',
-        f'runtime: {runtime:.1f}',
+        # f'R_errs: {R_errs:.1f}',
+        # f't_errs: {t_errs:.1f}',
+        # f'runtime: {runtime:.1f}',
     ]
 
     # make the figure
@@ -114,6 +125,36 @@ def make_evaluation_figure_color(data, b_id, alpha='dynamic', path=None, dpi=150
                                   color, text=text, path=path, dpi=dpi)
     return figure
 
+
+def make_evaluation_figure_trainval(data, b_id, alpha='dynamic', path=None, dpi=150):
+    b_mask = data['m_bids'] == b_id
+    conf_thr = _compute_conf_thresh(data)
+
+    img0 = data['imagec_0'][b_id]
+    img1 = data['imagec_1'][b_id]
+    kpts0 = data['mkpts0_f'][b_mask].cpu().numpy()
+    kpts1 = data['mkpts1_f'][b_mask].cpu().numpy()
+
+    # for megadepth, we visualize matches on the resized image
+    if 'scale0' in data:
+        kpts0 = kpts0 / data['scale0'][b_id].cpu().numpy()[[1, 0]]
+        kpts1 = kpts1 / data['scale1'][b_id].cpu().numpy()[[1, 0]]
+
+    img0 = img0 * (imagenet_std[:, None, None].to(img0.device)) + (imagenet_mean[:, None, None].to(img0.device))
+    img1 = img1 * (imagenet_std[:, None, None].to(img1.device)) + (imagenet_mean[:, None, None].to(img1.device))
+    img0, img1 = img0.detach().permute(1, 2, 0).cpu().numpy(), img1.detach().permute(1, 2, 0).cpu().numpy()
+    img0, img1 = np.clip(img0, 0.0, 1.0), np.clip(img1, 0.0, 1.0)
+
+    score = data['mconf_f'][b_mask].cpu().numpy()
+    color = cm.jet(score)
+    text = [
+        f'#Matches {len(kpts0)}',
+    ]
+
+    # make the figure
+    figure = make_matching_figure_color(img0, img1, kpts0, kpts1,
+                                  color, text=text, path=path, dpi=dpi)
+    return figure
 
 def make_colorwheel():
     """
@@ -280,7 +321,7 @@ def make_evaluation_figure_wheel(data, b_id=0, path=None, topk=10000):
     kpts_wh_0 = torch.flip(kpts0, [1]).cpu().numpy()
     kpts_wh_1 = torch.flip(kpts1, [1]).cpu().numpy()
     figure = vis_matches(img0, img1, kpts_wh_0, kpts_wh_1)
-    cv2.imwrite(path, figure)
+    # cv2.imwrite(path, figure)
     return figure
 
 
@@ -320,7 +361,7 @@ def make_matching_figures(data, mode='evaluation', path=None, dpi=150):
     Returns:
         figures (Dict[str, List[plt.figure]]
     """
-    assert mode in ['confidence', 'evaluation', 'wheel']  # 'confidence'
+    assert mode in ['confidence', 'evaluation', 'wheel', 'trainval']  # 'confidence'
     figures = {mode: []}
     for b_id in range(data['imagec_0'].size(0)):
         if mode == 'confidence':
@@ -329,11 +370,96 @@ def make_matching_figures(data, mode='evaluation', path=None, dpi=150):
             fig = make_evaluation_figure_color(data, b_id, dpi=dpi, path=path)
         elif mode == 'wheel':
             fig = make_evaluation_figure_wheel(data, b_id, path=path)
+        elif mode == 'trainval':
+            fig = make_evaluation_figure_trainval(data, b_id, path=path)
         else:
             raise ValueError(f'Unknown plot mode: {mode}')
         figures[mode].append(fig)
     return figures
 
+
+def _make_ground_truth_figure(data, b_id, alpha='dynamic'):
+    """ Creates a plot visualizing GROUND TRUTH matches for a batch item. """
+    # Extract images
+    img0 = data['imagec_0'][b_id]
+    img1 = data['imagec_1'][b_id]
+    img0 = img0 * (imagenet_std[:, None, None].to(img0.device)) + (imagenet_mean[:, None, None].to(img0.device))
+    img1 = img1 * (imagenet_std[:, None, None].to(img1.device)) + (imagenet_mean[:, None, None].to(img1.device))
+    img0, img1 = img0.detach().permute(1, 2, 0).cpu().numpy(), img1.detach().permute(1, 2, 0).cpu().numpy()
+    img0, img1 = np.clip(img0, 0.0, 1.0), np.clip(img1, 0.0, 1.0)
+
+    # Get GT match indices for the current batch item
+    spv_b_mask = data['spv_b_ids'] == b_id
+    spv_i_ids_b = data['spv_i_ids'][spv_b_mask] # Indices in image 0 grid
+    spv_j_ids_b = data['spv_j_ids'][spv_b_mask] # Indices in image 1 grid
+
+    kpts0_gt = np.array([])
+    kpts1_gt = np.array([])
+    num_gt_matches = len(spv_i_ids_b)
+
+    if num_gt_matches > 0:
+        # Check if necessary data exists
+        if 'spv_pt0_i' in data and 'spv_pt1_i' in data:
+            # Get coordinates from the stored original grid points using the GT indices
+            # Ensure indices are within bounds
+            h0w0 = data['spv_pt0_i'].shape[1]
+            h1w1 = data['spv_pt1_i'].shape[1]
+            if torch.all(spv_i_ids_b < h0w0) and torch.all(spv_j_ids_b < h1w1):
+                 kpts0_gt = data['spv_pt0_i'][b_id][spv_i_ids_b].cpu().numpy()
+                 kpts1_gt = data['spv_pt1_i'][b_id][spv_j_ids_b].cpu().numpy()
+
+                 # Handle scaling like in evaluation figure
+                 if 'scale0' in data and 'scale1' in data:
+                     scale0 = data['scale0'][b_id].cpu().numpy(); scale1 = data['scale1'][b_id].cpu().numpy()
+                     if scale0.size >= 2 and scale1.size >= 2:
+                          kpts0_gt = kpts0_gt / scale0[:2]; kpts1_gt = kpts1_gt / scale1[:2]
+                     else:
+                          kpts0_gt = kpts0_gt / scale0; kpts1_gt = kpts1_gt / scale1
+            else:
+                 num_gt_matches = 0 # Reset count if indices are bad
+                 kpts0_gt = np.array([])
+                 kpts1_gt = np.array([])
+        else:
+            num_gt_matches = 0 # Reset count if data is missing
+
+        # 限制最大显示数量
+        max_display = 100
+        if num_gt_matches > max_display:
+            # 随机选择max_display个点
+            indices = np.random.choice(num_gt_matches, max_display, replace=False)
+            kpts0_gt = kpts0_gt[indices]
+            kpts1_gt = kpts1_gt[indices]
+            display_gt_matches = max_display
+
+    # 对kpts0_gt每一条线随机生成一个颜色
+    color = np.random.rand(display_gt_matches, 3)
+    # Plotting (even if no matches, show images)
+    try:
+        figure = make_matching_figure_color(
+            img0, img1, kpts0_gt, kpts1_gt, color, # Pass GT keypoints
+            text=[f'Ground Truth', f'#gt Matches: {num_gt_matches}',f'#display Matches: {display_gt_matches}'],
+            # Color all lines the same (e.g., green) as they are all GT
+        )
+        return figure
+    except NameError: logger.error("make_matching_plot not found"); fig, ax = plt.subplots(); ax.text(0.5, 0.5, 'Plot Error'); return fig
+    except Exception as e: logger.error(f"Plotting Error: {e}"); fig, ax = plt.subplots(); ax.text(0.5, 0.5, 'Plot Error'); return fig
+
+
+def make_matching_gt_figures(data, mode='gt'):
+    """ Make matching figures for a batch.
+
+    Args:
+        data (Dict): a batch updated by PL_LoFTR.
+        config (Dict): matcher config
+    Returns:
+        figures (Dict[str, List[plt.figure]]
+    """
+    assert mode in ['gt']
+    figures = {mode: []}
+    for b_id in range(data['imagec_0'].size(0)):
+        fig_gt = _make_ground_truth_figure(data, b_id)
+        figures[mode].append(fig_gt)
+    return figures
 
 def dynamic_alpha(n_matches,
                   milestones=[0, 300, 1000, 2000],

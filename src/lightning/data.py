@@ -26,6 +26,7 @@ from src.utils import comm
 from src.datasets.megadepth import MegaDepthDataset
 from src.datasets.scannet import ScanNetDataset
 from src.datasets.sampler import RandomConcatSampler
+from src.datasets import get_dataset_class
 
 
 class MultiSceneDataModule(pl.LightningDataModule):
@@ -179,6 +180,7 @@ class MultiSceneDataModule(pl.LightningDataModule):
 
         if mode == 'train':
             local_npz_names = get_local_split(npz_names, self.world_size, self.rank, self.seed)
+            # local_npz_names = local_npz_names[:10]  # for debugging, only use 30 scenes
         else:
             local_npz_names = npz_names
         logger.info(f'[rank {self.rank}]: {len(local_npz_names)} scene(s) assigned.')
@@ -202,7 +204,9 @@ class MultiSceneDataModule(pl.LightningDataModule):
         datasets = []
         augment_fn = self.augment_fn if mode == 'train' else None
         data_source = self.trainval_data_source if mode in ['train', 'val'] else self.test_data_source
-        if str(data_source).lower() == 'megadepth':
+        # 根据注册表取得数据集类
+        DatasetCls = get_dataset_class(data_source)
+        if str(data_source).lower() in ['megadepth', 'whubuildings', 'jl1flight', 'satellite2d']:
             npz_names = [f'{n}.npz' for n in npz_names]
         for npz_name in tqdm(npz_names,
                              desc=f'[rank:{self.rank}] loading {mode} datasets',
@@ -230,6 +234,19 @@ class MultiSceneDataModule(pl.LightningDataModule):
                                      depth_padding=self.mgdpt_depth_pad,
                                      augment_fn=augment_fn,
                                      coarse_scale=self.coarse_scale))
+            elif data_source in ['whubuildings', 'jl1flight', 'satellite2d']:
+                datasets.append(
+                    DatasetCls(data_root,
+                                npz_path,
+                                mode=mode,
+                                min_overlap_score=min_overlap_score,
+                                img_resize=self.mgdpt_img_resize,
+                                df=self.mgdpt_df,
+                                img_padding=self.mgdpt_img_pad,
+                                depth_padding=self.mgdpt_depth_pad,
+                                augment_fn=augment_fn,
+                                coarse_scale=self.coarse_scale,
+                                ))
             else:
                 raise NotImplementedError()
         return ConcatDataset(datasets)
@@ -246,8 +263,10 @@ class MultiSceneDataModule(pl.LightningDataModule):
     ):
         augment_fn = self.augment_fn if mode == 'train' else None
         data_source = self.trainval_data_source if mode in ['train', 'val'] else self.test_data_source
-        if str(data_source).lower() == 'megadepth':
+        if str(data_source).lower() in ['megadepth', 'whubuildings', 'jl1flight', 'satellite2d']:
             npz_names = [f'{n}.npz' for n in npz_names]
+        # 根据注册表取得数据集类
+        DatasetCls = get_dataset_class(data_source)
         with tqdm_joblib(tqdm(desc=f'[rank:{self.rank}] loading {mode} datasets',
                               total=len(npz_names), disable=int(self.rank) != 0)):
             if data_source == 'ScanNet':
@@ -268,6 +287,21 @@ class MultiSceneDataModule(pl.LightningDataModule):
                 datasets = Parallel(n_jobs=math.floor(len(os.sched_getaffinity(0)) * 0.9 / comm.get_local_size()))(
                     delayed(lambda x: _build_dataset(
                         MegaDepthDataset,
+                        data_root,
+                        osp.join(npz_dir, x),
+                        mode=mode,
+                        min_overlap_score=min_overlap_score,
+                        img_resize=self.mgdpt_img_resize,
+                        df=self.mgdpt_df,
+                        img_padding=self.mgdpt_img_pad,
+                        depth_padding=self.mgdpt_depth_pad,
+                        augment_fn=augment_fn,
+                        coarse_scale=self.coarse_scale))(name)
+                    for name in npz_names)
+            elif data_source in ['whubuildings', 'jl1flight', 'satellite2d']:
+                datasets = Parallel(n_jobs=math.floor(len(os.sched_getaffinity(0)) * 0.9 / comm.get_local_size()))(
+                    delayed(lambda x: _build_dataset(
+                        DatasetCls,
                         data_root,
                         osp.join(npz_dir, x),
                         mode=mode,

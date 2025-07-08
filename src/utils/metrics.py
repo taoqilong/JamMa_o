@@ -231,7 +231,6 @@ def error_auc(errors, thresholds):
     recall = list(np.linspace(0, 1, len(errors)))
 
     aucs = []
-    thresholds = [5, 10, 20]
     for thr in thresholds:
         last_index = np.searchsorted(errors, thr)
         y = recall[:last_index] + [recall[last_index-1]]
@@ -449,3 +448,245 @@ def aggregate_metrics(metrics, epi_err_thr=5e-4):
     else:
         return {**aucs, **precs, **num}
 
+# replace pose error with corner error for 2D
+def compute_corner_error(M_est, M_gt, H, W):
+    """
+    Computes the average corner reprojection error between estimated and GT transforms.
+
+    Args:
+        M_est (np.ndarray): Estimated 2x3 or 3x3 transformation matrix. Can be None.
+        M_gt (np.ndarray): Ground truth 2x3 or 3x3 transformation matrix.
+        H (int): Height of the image corresponding to the source points (kpts0).
+        W (int): Width of the image corresponding to the source points (kpts0).
+
+    Returns:
+        float: Mean corner error in pixels. Returns np.inf if M_est is None or invalid.
+    """
+    if M_est is None:
+        return np.inf
+
+    corners = np.array([
+        [0, 0],       # Top-left
+        [W - 1, 0],   # Top-right
+        [W - 1, H - 1], # Bottom-right
+        [0, H - 1]    # Bottom-left
+    ]).astype(float)
+    corners_hom = np.hstack([corners, np.ones((4, 1))]) # [4, 3]
+
+    # Ensure matrices are 3x3
+    def ensure_3x3(M):
+        if M is None: return None
+        if M.shape == (2, 3):
+            return np.vstack([M, [0, 0, 1]])
+        elif M.shape == (3, 3):
+            return M
+        else:
+            logger.warning(f"Invalid matrix shape encountered: {M.shape}")
+            return None # Invalid shape
+
+    M_est_3x3 = ensure_3x3(M_est)
+    M_gt_3x3 = ensure_3x3(M_gt)
+
+    if M_est_3x3 is None or M_gt_3x3 is None:
+        return np.inf # Return Inf if any matrix is invalid
+
+    # Warp corners
+    corners_est_hom = corners_hom @ M_est_3x3.T # [4, 3]
+    corners_gt_hom = corners_hom @ M_gt_3x3.T  # [4, 3]
+
+    # Convert back from homogeneous, handle division by zero
+    def from_hom(pts_hom):
+        z = pts_hom[:, 2]
+        valid_z = np.abs(z) > 1e-8
+        pts = np.full((pts_hom.shape[0], 2), np.nan)
+        if np.any(valid_z):
+            pts[valid_z] = pts_hom[valid_z, :2] / z[valid_z, np.newaxis]
+        return pts
+
+    corners_est = from_hom(corners_est_hom) # [4, 2]
+    corners_gt = from_hom(corners_gt_hom)   # [4, 2]
+
+    # Calculate Euclidean distance between warped corners
+    # Handle potential NaN values from invalid projections
+    errors = np.linalg.norm(corners_est - corners_gt, axis=1) # [4,]
+
+    # Return mean error, treat NaN as Inf
+    errors[np.isnan(errors)] = np.inf
+    return np.mean(errors)
+
+def compute_gt_reprojection_error(affine_gt, kpts0, kpts1):
+    """ Computes reprojection error based on the ground truth transformation `affine_gt`. """
+    # (Implementation remains the same as previous version)
+    N = len(kpts0)
+    if N == 0: return np.array([])
+    pts0_hom = np.hstack([kpts0, np.ones((N, 1))])
+    if affine_gt.shape == (2, 3):
+        affine_gt_3x3 = np.vstack([affine_gt, [0, 0, 1]])
+    elif affine_gt.shape == (3, 3):
+        affine_gt_3x3 = affine_gt
+    else:
+        logger.error(f"Unsupported affine_gt shape: {affine_gt.shape}")
+        return np.full(N, np.nan)
+    pts1_gt_hom = pts0_hom @ affine_gt_3x3.T
+    z = pts1_gt_hom[:, 2]
+    valid_z_mask = np.abs(z) > 1e-8
+    pts1_gt = np.full_like(kpts1, np.nan)
+    if np.any(valid_z_mask):
+        pts1_gt[valid_z_mask] = pts1_gt_hom[valid_z_mask, :2] / z[valid_z_mask, np.newaxis]
+    error_gt = np.linalg.norm(pts1_gt - kpts1, axis=1)
+    # Keep NaN for now, handle in aggregation or compute_2d_errors
+    return error_gt
+
+def estimate_affine_transform(kpts0, kpts1, thresh=1.0, conf=0.99):
+    """ Estimates affine transform using RANSAC. """
+    # (Implementation remains the same as previous version)
+    if len(kpts0) < 3: return None, np.zeros(len(kpts0), dtype=bool)
+    kpts0 = np.float32(kpts0); kpts1 = np.float32(kpts1)
+    affine_matrix, inliers_mask = cv2.estimateAffine2D(
+        kpts0, kpts1, method=cv2.RANSAC, ransacReprojThreshold=thresh,
+        confidence=conf, maxIters=2000)
+    if affine_matrix is None: return None, np.zeros(len(kpts0), dtype=bool)
+    else: return affine_matrix, inliers_mask.ravel() > 0
+
+def estimate_homography(kpts0, kpts1, thresh=1.5, conf=0.9999):
+    if len(kpts0) < 4: return None, np.zeros(len(kpts0), dtype=bool)
+    kpts0 = np.float32(kpts0); kpts1 = np.float32(kpts1)
+    affine_matrix, inliers_mask = cv2.findHomography(
+        kpts0, kpts1, method=cv2.RANSAC, ransacReprojThreshold=thresh,
+        confidence=conf, maxIters=2000
+    )
+    if affine_matrix is None: return None, np.zeros(len(kpts0), dtype=bool)
+    else: return affine_matrix, inliers_mask.ravel().astype(bool)
+
+def compute_2d_errors(data, config):
+    """
+    Computes GT reprojection errors, estimates affine transform, computes corner error,
+    and determines GT/RANSAC inliers for a batch.
+    Updates data dict with relevant metrics needed for aggregate_metrics_2d.
+    """
+    # Threshold for determining ground truth inliers based on reprojection error
+    gt_inlier_threshold = config.TRAINER.RANSAC_PIXEL_THR
+    # Threshold and confidence for RANSAC affine estimation
+    ransac_threshold = config.TRAINER.RANSAC_PIXEL_THR # Can be same or different
+    ransac_conf = config.TRAINER.RANSAC_CONF
+    device = data['mkpts0_f'].device # Get device from a tensor in the batch
+
+    # Initialize lists to store results per batch item
+    all_reproj_errs_gt_list = []
+    all_gt_inliers_mask_list = []
+    # all_ransac_inliers_mask_list = [] # Only needed if RANSAC inlier ratio is reported
+    all_corner_errors_list = []
+    all_identifiers_list = [] # For duplicate filtering
+
+    # Ensure data tensors are on CPU for numpy/OpenCV conversion
+    m_bids = data['m_bids'].cpu().numpy()
+    pts0 = data['mkpts0_f'].detach().cpu().numpy()
+    pts1 = data['mkpts1_f'].detach().cpu().numpy()
+    if 'M_0to1' not in data:
+        logger.error("M_0to1 not found in batch data for compute_2d_errors")
+        data.update({ # Update with empty/default values
+            'reproj_errs': torch.empty(0, device=device), 'inliers': [], 'corner_errs': [], 'identifiers': []
+        })
+        return
+    affine_gts = data['M_0to1'].cpu().numpy()
+
+    # Get image shape for corner error
+    try: N, C, H0, W0 = data['imagec_0'].shape
+    except KeyError: logger.error("image0 not found"); H0, W0 = -1, -1
+
+    # Get identifiers if available
+    identifiers = data.get('identifiers', None) # Get identifiers if compute_metrics added them
+
+    bs = affine_gts.shape[0] # Batch size
+
+    for i in range(bs):
+        mask = m_bids == i
+        kpts0_bs = pts0[mask]; kpts1_bs = pts1[mask]
+        affine_gt = affine_gts[i]
+        num_matches = len(kpts0_bs)
+        current_H, current_W = H0, W0
+
+        reproj_errs_gt = np.array([]); gt_inliers_mask = np.array([], dtype=bool)
+        ransac_inliers_mask = np.array([], dtype=bool); corner_error = np.inf
+
+        if num_matches > 0:
+            reproj_errs_gt = compute_gt_reprojection_error(affine_gt, kpts0_bs, kpts1_bs)
+            gt_inliers_mask = (~np.isnan(reproj_errs_gt)) & (reproj_errs_gt < gt_inlier_threshold)
+            affine_est, ransac_inliers_mask = estimate_homography(kpts0_bs, kpts1_bs, ransac_threshold, ransac_conf)
+            if current_H > 0 and current_W > 0:
+                corner_error = compute_corner_error(affine_est, affine_gt, current_H, current_W)
+            else: corner_error = np.nan
+
+        all_reproj_errs_gt_list.append(reproj_errs_gt)
+        all_gt_inliers_mask_list.append(gt_inliers_mask)
+        # all_ransac_inliers_mask_list.append(ransac_inliers_mask)
+        all_corner_errors_list.append(corner_error)
+        if identifiers: all_identifiers_list.append(identifiers[i])
+
+    # --- Concatenate and Update Batch Data ---
+    # Note: We store lists per pair for aggregation, not concatenated tensors here.
+    # Concatenation happens *during* aggregation after filtering duplicates.
+
+    data.update({
+        # Store errors and masks as lists of numpy arrays (needed for filtering in aggregation)
+        'reproj_errors_list': all_reproj_errs_gt_list, # List[np.ndarray[Mi]] GT reproj error (may contain NaN)
+        'inliers': all_gt_inliers_mask_list,       # List[np.ndarray[Mi]], GT inlier mask
+        # 'ransac_inliers': all_ransac_inliers_mask_list, # List[np.ndarray[Mi]], RANSAC inlier mask
+        'corner_errs': all_corner_errors_list,         # List[float], Corner error per pair (float/Inf/NaN)
+        'identifiers': all_identifiers_list            # List[str], Identifiers for filtering
+    })
+
+
+def aggregate_metrics_2d_train_val(metrics, reproj_err_thr=3.0, config=None):
+    """ Aggregate metrics for the whole dataset:
+    (This method should be called once per dataset)
+    1. AUC of the corner error (angular) at the threshold [3, 5, 10]
+    2. Mean matching precision at the threshold 3(all datasets without depth)
+    """
+    # filter duplicates
+    unq_ids = OrderedDict((iden, id) for id, iden in enumerate(metrics['identifiers']))
+    unq_ids = list(unq_ids.values())
+    logger.info(f'Aggregating metrics over {len(unq_ids)} unique items...')
+
+    # corner error auc
+    corner_thresholds = [3, 5, 10]
+    if config.JAMMA.EVAL_TIMES >= 1:
+        corner_errors = np.asarray(metrics['corner_errs'], dtype=float).reshape(-1, config.JAMMA.EVAL_TIMES)[unq_ids].reshape(-1)
+    else:
+        corner_errors = np.asarray(metrics['corner_errs'], dtype=float)[unq_ids]
+    corner_errors[np.isnan(corner_errors)] = np.inf
+    aucs = error_auc(corner_errors, list(corner_thresholds)) # (auc@3, auc@5, auc@10)
+
+    # matching precision
+    dist_thresholds = [reproj_err_thr]
+
+    precs, rec, max, num, precision, recall, f1 = epidist_prec_rec_max_f1(metrics, np.array(metrics['reproj_errors_list'], dtype=object)[unq_ids], dist_thresholds, metrics['max_matches'], True)  # (prec@err_thr)
+
+    return {**aucs, **precs, **rec, **max, **num, **precision, **recall, **f1}
+
+def aggregate_metrics_2d_test(metrics, reproj_err_thr=3.0, config=None):
+    """ Aggregate metrics for the whole dataset:
+    (This method should be called once per dataset)
+    1. AUC of the corner error (angular) at the threshold [3, 5, 10]
+    2. Mean matching precision at the threshold 3(all datasets without depth)
+    """
+    # filter duplicates
+    unq_ids = OrderedDict((iden, id) for id, iden in enumerate(metrics['identifiers']))
+    unq_ids = list(unq_ids.values())
+    logger.info(f'Aggregating metrics over {len(unq_ids)} unique items...')
+
+    # corner error auc
+    corner_thresholds = [3, 5, 10]
+    if config.JAMMA.EVAL_TIMES >= 1:
+        corner_errors = np.asarray(metrics['corner_errs'], dtype=float).reshape(-1, config.JAMMA.EVAL_TIMES)[unq_ids].reshape(-1)
+    else:
+        corner_errors = np.asarray(metrics['corner_errs'], dtype=float)[unq_ids]
+    corner_errors[np.isnan(corner_errors)] = np.inf
+    aucs = error_auc(corner_errors, list(corner_thresholds)) # (auc@3, auc@5, auc@10)
+
+    # matching precision
+    dist_thresholds = [reproj_err_thr]
+
+    precs, num = epidist_prec(np.array(metrics['reproj_errors_list'], dtype=object)[unq_ids], dist_thresholds, True)  # (prec@err_thr)
+
+    return {**aucs, **precs, **num}

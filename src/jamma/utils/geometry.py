@@ -54,6 +54,27 @@ def warp_kpts(kpts0, depth0, depth1, T_0to1, K0, K1):
     return valid_mask, w_kpts0
 
 @torch.no_grad()
+def warp_kpts_2d(kpts, M):
+    """
+    Warp 2-D keypoints with a batch of 3×3 homographies/仿射矩阵.
+
+    Args:
+        kpts (torch.Tensor): [N, L, 2]  –  <x, y> in image-0 coords
+        M    (torch.Tensor): [N, 3, 3]  –  homography from image-0 → image-1
+
+    Returns:
+        valid_mask (torch.BoolTensor): [N, L]  – 此实现恒为 True（仅提供占位）
+        kpts_warp  (torch.Tensor)     : [N, L, 2] – warped <x', y'>
+    """
+    N, L, _ = kpts.shape
+    k_h = torch.cat([kpts, torch.ones_like(kpts[..., :1])], dim=-1)          # (N, L, 3)
+    k_h = k_h.permute(0, 2, 1)                                              # (N, 3, L)
+    k_warp_h = (M @ k_h).permute(0, 2, 1)                                   # (N, L, 3)
+    k_warp   = k_warp_h[..., :2] / (k_warp_h[..., 2:]+1e-6)                 # (N, L, 2)
+    valid    = torch.ones(N, L, dtype=torch.bool, device=kpts.device)       # 统一交给后续 OOB 检测
+    return valid, k_warp
+
+@torch.no_grad()
 def warp_kpts_fine(kpts0, depth0, depth1, T_0to1, K0, K1, b_ids):
     """ Warp kpts0 from I0 to I1 with depth, K and Rt for give batch ids
     Also check covisibility and depth consistency.

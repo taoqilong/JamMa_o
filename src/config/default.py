@@ -119,6 +119,7 @@ _CN.TRAINER.RANSAC_PIXEL_THR = 0.5
 _CN.TRAINER.RANSAC_CONF = 0.99999
 _CN.TRAINER.RANSAC_MAX_ITERS = 10000
 _CN.TRAINER.USE_MAGSACPP = False
+_CN.TRAINER.REPROJ_ERR_THR = 3
 
 # data sampler for train_dataloader
 _CN.TRAINER.DATA_SAMPLER = 'scene_balance'  # options: ['scene_balance', 'random', 'normal']
