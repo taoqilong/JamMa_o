@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from loguru import logger
 from src.datasets import register
-from src.utils.dataset import read_megadepth_depth, read_megadepth_color, read_dataset_color
+from src.utils.dataset import read_megadepth_depth, read_megadepth_color, read_dataset_color,read_dataset_gray
 
 @register("jl1flight")
 class JL1FlightDataset(Dataset):
@@ -76,6 +76,10 @@ class JL1FlightDataset(Dataset):
             img_name0, self.img_resize, self.df, self.img_padding)
         imagec_1, scale1, mask1, prepad_size1 = read_dataset_color(
             img_name1, self.img_resize, self.df, self.img_padding)
+        # imagec_0, scale0, mask0, prepad_size0 = read_dataset_gray(
+        #     img_name0, self.img_resize, self.df, self.img_padding)
+        # imagec_1, scale1, mask1, prepad_size1 = read_dataset_gray(
+        #     img_name1, self.img_resize, self.df, self.img_padding)
 
         # read affine_matrices
         M_0to1 = self.scene_info['affine_matrices'][idx1]

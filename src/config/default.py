@@ -53,6 +53,7 @@ _CN.DATASET.VAL_POSE_ROOT = None  # (optional directory for poses)
 _CN.DATASET.VAL_NPZ_ROOT = None
 _CN.DATASET.VAL_LIST_PATH = None    # None if val data from all scenes are bundled into a single npz file
 _CN.DATASET.VAL_INTRINSIC_PATH = None
+_CN.DATASET.INPUT_CHANNELS = 3
 # testing
 _CN.DATASET.TEST_DATA_SOURCE = None
 _CN.DATASET.TEST_DATA_ROOT = None

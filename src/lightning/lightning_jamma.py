@@ -25,6 +25,8 @@ from src.utils.misc import lower_config, flattenList
 from src.utils.profiler import PassThroughProfiler
 from thop import profile
 from src.utils.plotting import make_matching_figures, make_matching_gt_figures
+from torchvision.utils import make_grid
+from torchvision.transforms.functional import normalize
 
 
 class PL_JamMa(pl.LightningModule):
@@ -55,6 +57,9 @@ class PL_JamMa(pl.LightningModule):
             self.load_state_dict(state_dict, strict=True)
             logger.info(f"Load \'{pretrained_ckpt}\' as pretrained checkpoint")
 
+        if config.DATASET.INPUT_CHANNELS == 1:
+            self._adapt_stem_to_gray()
+
         # Testing
         self.dump_dir = dump_dir
         self.start_event = torch.cuda.Event(enable_timing=True)
@@ -62,6 +67,13 @@ class PL_JamMa(pl.LightningModule):
         self.total_ms = 0
         n_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print('number of params:', n_parameters / 1e6)
+
+    def _adapt_stem_to_gray(self):
+        conv = self.backbone.cnn.downsample_layers[0][0]
+        w_gray = conv.weight.data.mean(1, keepdim=True)
+        new_conv = torch.nn.Conv2d(1, w_gray.size(0), 4, 4, bias=False)
+        new_conv.weight.data.copy_(w_gray)
+        self.backbone.cnn.downsample_layers[0][0] = new_conv
 
     def configure_optimizers(self):
         # FIXME: The scheduler did not work properly when `--resume_from_checkpoint`
@@ -197,6 +209,21 @@ class PL_JamMa(pl.LightningModule):
                     'corner_errs': batch['corner_errs']}
                 ret_dict = {'metrics': metrics}
         return ret_dict, rel_pair_names
+    
+    def _log_feature_maps(self, global_step):
+        if not self._feat_caches:
+            return
+        for name, feat in self._feat_caches.items():
+            # feat: (B,C,H,W)  只取 B=0
+            feat_b0 = feat[0]                   # (C,H,W)
+            # —— 方式 A：把前 8 个通道拼成网格 —— #
+            num_show = min(8, feat_b0.shape[0])
+            grid = make_grid(feat_b0[:num_show].unsqueeze(1),  # (N,1,H,W)
+                            nrow=num_show, normalize=True,
+                            scale_each=True)
+            self.logger.experiment.add_image(
+                f'feature/{name}', grid, global_step=global_step)
+        self._feat_caches.clear()
 
     def training_step(self, batch, batch_idx):
 
@@ -210,6 +237,9 @@ class PL_JamMa(pl.LightningModule):
                 self.logger.experiment.add_scalar(f'train_loss/{k}', v, self.global_step)
             # figures
             if self.config.TRAINER.ENABLE_PLOTTING:
+                # feature map
+                self._log_feature_maps(self.global_step)
+                # visible match
                 if self.config.DATASET.TRAINVAL_DATA_SOURCE.lower() in ['scannet', 'megadepth']:
                     # compute_symmetrical_epipolar_errors(batch)  # compute epi_errs for each match
                     figures = make_matching_figures(batch, mode='trainval')

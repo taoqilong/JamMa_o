@@ -301,3 +301,38 @@ def read_dataset_color(path, resize=None, df=None, padding=False):
 
     image = torch.from_numpy(image).float()[None]          # (1,3,H,W)
     return image, scale, mask, torch.tensor([h_new, w_new])
+
+def read_dataset_gray(path, resize=None, df=None, padding=False, augment_fn=None):
+    """
+    Args:
+        resize (int, optional): the longer edge of resized images. None for no resize.
+        padding (bool): If set to 'True', zero-pad resized images to squared size.
+        augment_fn (callable, optional): augments images with pre-defined visual effects
+    Returns:
+        image (torch.tensor): (1, 1, h, w)
+        mask (torch.tensor): (h, w)
+        scale (torch.tensor): [w/w_new, h/h_new]
+        new_hw : torch.LongTensor   [H_new, W_new]   (含 padding 前尺寸)
+    """
+    # read image
+    image = imread_gray(path, augment_fn, client=MEGADEPTH_CLIENT)
+
+    # resize image
+    w, h = image.shape[1], image.shape[0]
+    w_new, h_new = get_resized_wh(w, h, resize)
+    w_new, h_new = get_divisible_wh(w_new, h_new, df)
+
+    image = cv2.resize(image, (w_new, h_new))
+    scale = torch.tensor([w/w_new, h/h_new], dtype=torch.float)
+
+    if padding:  # padding
+        pad_to = max(h_new, w_new)
+        # image, mask = pad_bottom_right_with_black_border(image, pad_to, ret_mask=True) # 函数有问题，不适用于现在的数据集
+        image, mask = pad_bottom_right(image, pad_to, ret_mask=True)
+    else:
+        mask = None
+
+    image = torch.from_numpy(image).float()[None,None] / 255  # (h, w) -> (1,1, h, w) and normalized
+    mask = torch.from_numpy(mask)
+
+    return image, scale, mask, torch.tensor([h_new, w_new])

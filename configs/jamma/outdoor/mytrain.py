@@ -8,7 +8,7 @@ cfg.JAMMA.FINE.D_MODEL = 64
 cfg.TRAINER.SCHEDULER = 'CosineAnnealing'  # [MultiStepLR, CosineAnnealing, ExponentialLR]
 cfg.TRAINER.COSA_TMAX = 30  # COSA: CosineAnnealing
 cfg.TRAINER.CANONICAL_BS = 2
-cfg.TRAINER.CANONICAL_LR = 5e-6 # 1e-4
+cfg.TRAINER.CANONICAL_LR = 1e-4 # 1e-4
 cfg.TRAINER.WARMUP_STEP = 18000  # 3 epochs
 
 # pose estimation
@@ -19,8 +19,9 @@ cfg.TRAINER.ADAMW_DECAY = 0.1
 cfg.JAMMA.MATCH_COARSE.TRAIN_COARSE_PERCENT = 0.3
 cfg.JAMMA.MATCH_COARSE.TRAIN_PAD_NUM_GT_MIN = 20
 cfg.TRAINER.N_VAL_PAIRS_TO_PLOT = 3
-cfg.JAMMA.LOSS.FINE_WEIGHT = 0.
-cfg.JAMMA.LOSS.SUB_WEIGHT = 0
+cfg.JAMMA.LOSS.FINE_WEIGHT = 1.
+cfg.JAMMA.LOSS.SUB_WEIGHT = 1
 cfg.JAMMA.MP = True  # use mixed precision training
+# cfg.DATASET.INPUT_CHANNELS = 1
 
 cfg.TRAINER.SEED = 66
